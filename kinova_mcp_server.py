@@ -76,6 +76,135 @@ def clear_robot_faults() -> str:
     """
     return "[Stub] Fault clearing not implemented. Use Kortex API."
 
+@mcp.tool()
+def remote_ssh_exec(command: str, host: str = "kinova@10.12.140.145") -> str:
+    """
+    Execute a command on the remote Kinova desktop via SSH.
+    """
+    try:
+        result = subprocess.run(
+            ["ssh", host, command],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if result.returncode == 0:
+            return result.stdout
+        return f"SSH exit {result.returncode}\nstderr:\n{result.stderr}"
+    except Exception as e:
+        return f"SSH exception: {e}"
+
+@mcp.tool()
+def scp_upload(local_path: str, remote_path: str, host: str = "kinova@10.12.140.145") -> str:
+    """
+    Copy a local file or directory to the remote Kinova machine.
+    """
+    try:
+        result = subprocess.run(
+            ["scp", "-r", local_path, f"{host}:{remote_path}"],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        if result.returncode == 0:
+            return f"Uploaded {local_path} to {host}:{remote_path}"
+        return f"SCP upload exit {result.returncode}\nstderr:\n{result.stderr}"
+    except Exception as e:
+        return f"SCP upload exception: {e}"
+
+@mcp.tool()
+def scp_download(remote_path: str, local_path: str, host: str = "kinova@10.12.140.145") -> str:
+    """
+    Copy a file or directory from the remote Kinova machine to the local host.
+    """
+    try:
+        result = subprocess.run(
+            ["scp", "-r", f"{host}:{remote_path}", local_path],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        if result.returncode == 0:
+            return f"Downloaded {host}:{remote_path} to {local_path}"
+        return f"SCP download exit {result.returncode}\nstderr:\n{result.stderr}"
+    except Exception as e:
+        return f"SCP download exception: {e}"
+
+@mcp.tool()
+def rsync_to_remote(local_path: str, remote_path: str, host: str = "kinova@10.12.140.145") -> str:
+    """
+    Sync a local path to the remote Kinova machine using rsync.
+    """
+    try:
+        result = subprocess.run(
+            ["rsync", "-avz", local_path, f"{host}:{remote_path}"],
+            capture_output=True,
+            text=True,
+            timeout=180
+        )
+        if result.returncode == 0:
+            return result.stdout or f"Rsync to {host}:{remote_path} completed successfully."
+        return f"Rsync upload exit {result.returncode}\nstderr:\n{result.stderr}"
+    except Exception as e:
+        return f"Rsync upload exception: {e}"
+
+@mcp.tool()
+def rsync_from_remote(remote_path: str, local_path: str, host: str = "kinova@10.12.140.145") -> str:
+    """
+    Sync a remote path from the Kinova machine to the local host using rsync.
+    """
+    try:
+        result = subprocess.run(
+            ["rsync", "-avz", f"{host}:{remote_path}", local_path],
+            capture_output=True,
+            text=True,
+            timeout=180
+        )
+        if result.returncode == 0:
+            return result.stdout or f"Rsync from {host}:{remote_path} completed successfully."
+        return f"Rsync download exit {result.returncode}\nstderr:\n{result.stderr}"
+    except Exception as e:
+        return f"Rsync download exception: {e}"
+
+@mcp.tool()
+def check_remote_usage_status(host: str = "kinova@10.12.140.145") -> str:
+    """
+    Check whether another user is actively using the arm or cameras on the remote Kinova desktop.
+    """
+    remote_command = r"""
+set -e
+
+echo '=== ACTIVE USERS ==='
+who || true
+
+echo '\n=== SSH SESSIONS ==='
+ps -eo user,pid,cmd | grep -E 'ssh|sshd' | grep -v grep || true
+
+echo '\n=== ROS 2 CAMERA/ARM ACTIVITY ==='
+if command -v ros2 >/dev/null 2>&1; then
+  ros2 node list 2>/dev/null || echo 'ros2 node list unavailable'
+  echo '---'
+  ros2 topic list 2>/dev/null | grep -E 'camera|image|depth|joint|arm|kinova' || echo 'No ROS camera/arm topics found'
+else
+  echo 'ros2 CLI not available on remote host'
+fi
+
+echo '\n=== CAMERA DEVICE USAGE ==='
+for dev in /dev/video*; do
+  if [ -e "$dev" ]; then
+    echo "Device: $dev"
+    if command -v lsof >/dev/null 2>&1; then
+      lsof "$dev" 2>/dev/null || echo '  no process holding device'
+    elif command -v fuser >/dev/null 2>&1; then
+      fuser -v "$dev" 2>/dev/null || echo '  no process holding device'
+    else
+      echo '  neither lsof nor fuser available'
+    fi
+  fi
+ done
+"""
+    return remote_ssh_exec(remote_command, host)
+
 if __name__ == "__main__":
     # Initialize and run the server using standard stdio transport for MCP
     mcp.run()
