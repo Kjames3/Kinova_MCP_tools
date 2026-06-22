@@ -1,0 +1,17 @@
+# Python bytecode
+*.py[cod]
+__pycache__/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+.env/
+
+# IDE files
+.vscode/
+*.swp
