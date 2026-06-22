@@ -74,7 +74,7 @@ These tools rely on the local machine having SSH access to the Kinova desktop. F
 - Configure `~/.ssh/config` with an alias like:
   ```text
   Host real-1
-    HostName 10.12.140.145
+    HostName <DEKSTOP_IP>
     User kinova
     IdentityFile ~/.ssh/id_rsa
   ```
