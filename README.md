@@ -79,7 +79,6 @@ These tools rely on the local machine having SSH access to the Kinova desktop. F
     IdentityFile ~/.ssh/id_rsa
   ```
 - Use SSH key-based auth so the MCP server can connect without interactive password prompts.
-- Confirm `ssh kinova@10.12.140.145 date` works from this machine.
 
 ## Customizing
 
