@@ -60,6 +60,26 @@ The `kinova_mcp_server.py` provides the following tools. You will need to fill i
 - `manage_isaac_sim`: Starts Isaac Sim.
 - `fetch_kinova_diagnostics`: Reads logs from the Kinova controller.
 - `clear_robot_faults`: Clears protective stops.
+- `remote_ssh_exec`: Run a shell command on the remote Kinova desktop at `kinova@10.12.140.145`.
+- `scp_upload`: Copy a local file or directory to the remote host.
+- `scp_download`: Copy a file or directory from the remote host to local storage.
+- `rsync_to_remote`: Sync a local path to the remote host.
+- `rsync_from_remote`: Sync a remote path from the remote host to local storage.
+- `check_remote_usage_status`: Check current remote users, SSH sessions, ROS node/topic activity, and camera device usage.
+
+## Remote access notes
+
+These tools rely on the local machine having SSH access to the Kinova desktop. For best results:
+
+- Configure `~/.ssh/config` with an alias like:
+  ```text
+  Host real-1
+    HostName 10.12.140.145
+    User kinova
+    IdentityFile ~/.ssh/id_rsa
+  ```
+- Use SSH key-based auth so the MCP server can connect without interactive password prompts.
+- Confirm `ssh kinova@10.12.140.145 date` works from this machine.
 
 ## Customizing
 
