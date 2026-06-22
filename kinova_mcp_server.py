@@ -83,7 +83,15 @@ def remote_ssh_exec(command: str, host: str = "kinova@10.12.140.145") -> str:
     """
     try:
         result = subprocess.run(
-            ["ssh", host, command],
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                host,
+                command,
+            ],
             capture_output=True,
             text=True,
             timeout=60
@@ -101,7 +109,14 @@ def scp_upload(local_path: str, remote_path: str, host: str = "kinova@10.12.140.
     """
     try:
         result = subprocess.run(
-            ["scp", "-r", local_path, f"{host}:{remote_path}"],
+            [
+                "scp",
+                "-o",
+                "BatchMode=yes",
+                "-r",
+                local_path,
+                f"{host}:{remote_path}",
+            ],
             capture_output=True,
             text=True,
             timeout=120
@@ -119,7 +134,14 @@ def scp_download(remote_path: str, local_path: str, host: str = "kinova@10.12.14
     """
     try:
         result = subprocess.run(
-            ["scp", "-r", f"{host}:{remote_path}", local_path],
+            [
+                "scp",
+                "-o",
+                "BatchMode=yes",
+                "-r",
+                f"{host}:{remote_path}",
+                local_path,
+            ],
             capture_output=True,
             text=True,
             timeout=120
@@ -137,7 +159,14 @@ def rsync_to_remote(local_path: str, remote_path: str, host: str = "kinova@10.12
     """
     try:
         result = subprocess.run(
-            ["rsync", "-avz", local_path, f"{host}:{remote_path}"],
+            [
+                "rsync",
+                "-avz",
+                "-e",
+                "ssh -o StrictHostKeyChecking=no -o BatchMode=yes",
+                local_path,
+                f"{host}:{remote_path}",
+            ],
             capture_output=True,
             text=True,
             timeout=180
@@ -155,7 +184,14 @@ def rsync_from_remote(remote_path: str, local_path: str, host: str = "kinova@10.
     """
     try:
         result = subprocess.run(
-            ["rsync", "-avz", f"{host}:{remote_path}", local_path],
+            [
+                "rsync",
+                "-avz",
+                "-e",
+                "ssh -o BatchMode=yes",
+                f"{host}:{remote_path}",
+                local_path,
+            ],
             capture_output=True,
             text=True,
             timeout=180
@@ -177,10 +213,12 @@ set -e
 echo '=== ACTIVE USERS ==='
 who || true
 
-echo '\n=== SSH SESSIONS ==='
+echo
+echo '=== SSH SESSIONS ==='
 ps -eo user,pid,cmd | grep -E 'ssh|sshd' | grep -v grep || true
 
-echo '\n=== ROS 2 CAMERA/ARM ACTIVITY ==='
+echo
+echo '=== ROS 2 CAMERA/ARM ACTIVITY ==='
 if command -v ros2 >/dev/null 2>&1; then
   ros2 node list 2>/dev/null || echo 'ros2 node list unavailable'
   echo '---'
@@ -189,7 +227,8 @@ else
   echo 'ros2 CLI not available on remote host'
 fi
 
-echo '\n=== CAMERA DEVICE USAGE ==='
+echo
+echo '=== CAMERA DEVICE USAGE ==='
 for dev in /dev/video*; do
   if [ -e "$dev" ]; then
     echo "Device: $dev"
