@@ -1,6 +1,8 @@
 import os
 import subprocess
 import json
+import shlex
+import sys
 from mcp.server.fastmcp import FastMCP
 
 # Create an MCP server for Kinova Gen3
@@ -101,6 +103,97 @@ def remote_ssh_exec(command: str, host: str = "kinova@10.12.140.145") -> str:
         return f"SSH exit {result.returncode}\nstderr:\n{result.stderr}"
     except Exception as e:
         return f"SSH exception: {e}"
+
+@mcp.tool()
+def inspect_installed_packages(
+    context: str = "local",
+    include_ros: bool = True,
+    include_python: bool = True,
+    include_system: bool = True,
+    host: str = "kinova@10.12.140.145",
+) -> str:
+    """
+    Inspect installed packages locally or on a remote host.
+
+    Arguments:
+      - context: 'local' or 'remote'
+      - include_ros: include ROS 1 and ROS 2 package listings
+      - include_python: include Python packages
+      - include_system: include OS-level packages
+      - host: remote SSH host when context is 'remote'
+    """
+    if context not in {"local", "remote"}:
+        return "Invalid context. Use 'local' or 'remote'."
+
+    section_commands = []
+    if include_system:
+        section_commands.append("echo '=== SYSTEM PACKAGES ==='")
+        section_commands.append(
+            "if command -v dpkg >/dev/null 2>&1; then \
+                dpkg-query -W -f='${Package} ${Version}\\n' | sort; \
+             elif command -v rpm >/dev/null 2>&1; then \
+                rpm -qa | sort; \
+             else \
+                echo 'No supported system package manager found'; \
+             fi"
+        )
+    if include_python:
+        section_commands.append("echo '\n=== PYTHON PACKAGES ==='")
+        section_commands.append(f"{shlex.quote(sys.executable)} -m pip list --format=columns || true")
+    if include_ros:
+        section_commands.append("echo '\n=== ROS 1 PACKAGES ==='")
+        section_commands.append(
+            "if command -v rospack >/dev/null 2>&1; then rospack list | sort; else echo 'rospack not available'; fi"
+        )
+        section_commands.append("echo '\n=== ROS 2 PACKAGES ==='")
+        section_commands.append(
+            "if command -v ros2 >/dev/null 2>&1; then ros2 pkg list | sort; else echo 'ros2 CLI not available'; fi"
+        )
+
+    if not section_commands:
+        return "No package categories requested."
+
+    full_command = " && ".join(section_commands)
+    if context == "remote":
+        return remote_ssh_exec(full_command, host)
+
+    try:
+        result = subprocess.run(full_command, shell=True, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            return result.stdout
+        return f"Local inspect exit {result.returncode}\nstderr:\n{result.stderr}"
+    except Exception as e:
+        return f"Local inspect exception: {e}"
+
+@mcp.tool()
+def install_packages_ssh(
+    packages: str,
+    manager: str = "apt",
+    host: str = "kinova@10.12.140.145",
+    use_sudo: bool = True,
+) -> str:
+    """
+    Install packages on the remote host via SSH.
+
+    Arguments:
+      - packages: space-separated list of package names to install
+      - manager: 'apt' or 'pip'
+      - host: remote SSH host
+      - use_sudo: whether to run installation with sudo (for apt)
+    """
+    if not packages.strip():
+        return "No packages specified."
+
+    package_args = " ".join(shlex.quote(token) for token in shlex.split(packages))
+    if manager == "apt":
+        sudo_prefix = "sudo " if use_sudo else ""
+        remote_command = f"{sudo_prefix}apt-get update -y && {sudo_prefix}apt-get install -y {package_args}"
+    elif manager == "pip":
+        remote_command = f"python3 -m pip install {package_args}"
+    else:
+        return "Unsupported manager. Use 'apt' or 'pip'."
+
+    return remote_ssh_exec(remote_command, host)
 
 @mcp.tool()
 def scp_upload(local_path: str, remote_path: str, host: str = "kinova@10.12.140.145") -> str:
