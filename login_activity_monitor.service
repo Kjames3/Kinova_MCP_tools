@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env python3 /home/kamren/Kinova_MCP_tools/login_activity_monitor.py --output /var/log/kinova_session_report.log
+ExecStart=/usr/bin/env python3 /opt/kinova/login_activity_monitor.py --output /opt/kinova/logs/kinova_session_report.log
 User=kinova
 Group=kinova
 StandardOutput=journal

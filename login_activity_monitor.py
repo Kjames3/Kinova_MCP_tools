@@ -8,7 +8,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-DEFAULT_LOG_PATH = Path("/var/log/kinova_session_report.log")
+DEFAULT_LOG_PATH = Path("/opt/kinova/logs/kinova_session_report.log")
 
 
 def run_command(command):
