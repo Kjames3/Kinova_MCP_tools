@@ -35,7 +35,21 @@ def parse_who_output(output):
             continue
         user = parts[0]
         tty = parts[1]
-        login_time = " ".join(parts[2:5])
+        login_time = " ".join(parts[2:4])
+        
+        try:
+            login_dt = datetime.strptime(login_time, "%Y-%m-%d %H:%M")
+            duration = datetime.now() - login_dt
+            total_seconds = int(duration.total_seconds())
+            hours, remainder = divmod(total_seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            if hours > 0:
+                duration_str = f"{hours}h {minutes}m"
+            else:
+                duration_str = f"{minutes}m"
+        except Exception:
+            duration_str = "?"
+
         pid = None
         host = None
         if len(parts) >= 6:
@@ -46,6 +60,7 @@ def parse_who_output(output):
             "user": user,
             "tty": tty,
             "login_time": login_time,
+            "duration": duration_str,
             "pid": pid,
             "host": host,
         })
@@ -61,11 +76,19 @@ def get_user_processes(user):
     output = run_command(f"ps -u {shlex.quote(user)} -o pid=,comm=,args=")
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     processes = []
+    
+    ignore_comms = {
+        "systemd", "(sd-pam)", "pipewire", "pipewire-media-", "pulseaudio",
+        "user-session-he", "sshd", "dbus-daemon", "xdg-document-po", 
+        "xdg-permission-", "bash", "sh", "tmux", "zsh", "sudo", "su", "snapd"
+    }
+    
     for line in lines:
         match = re.match(r"^(\d+)\s+(\S+)\s+(.*)$", line)
         if match:
             pid, comm, args = match.groups()
-            processes.append({"pid": pid, "command": comm, "args": args})
+            if comm not in ignore_comms and "systemd" not in comm and "tracker" not in comm and "gnome" not in comm:
+                processes.append({"pid": pid, "command": comm, "args": args})
     return processes
 
 
@@ -117,27 +140,48 @@ def get_availability_report():
 
 def format_session_report(sessions, availability):
     lines = []
-    lines.append(f"Kinova session report generated: {datetime.now().isoformat()}")
-    lines.append("\n=== Logged-in sessions ===")
+    lines.append(f"Kinova Session Report: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("=" * 90)
+    lines.append(f"{'USER':<8} | {'TTY':<5} | {'LOGIN TIME':<16} | {'TIME LOGGED':<11} | {'HOST':<14} | {'ACTIVE SCRIPTS'}")
+    lines.append("-" * 90)
+    
     if not sessions:
         lines.append("No users are currently logged in.")
     else:
         for session in sessions:
-            lines.append(
-                f"User: {session['user']}  tty: {session['tty']}  login: {session['login_time']}  host: {session.get('host', '-')}")
-            if session.get("pid"):
-                processes = get_user_processes(session["user"])
-                if processes:
-                    lines.append("  Running processes:")
-                    for proc in processes[:10]:
-                        lines.append(f"    [{proc['pid']}] {proc['command']} {proc['args']}")
-                else:
-                    lines.append("  No visible processes for this user.")
-    lines.append("\n=== Resource availability ===")
-    lines.append(f"Camera: {availability['camera']}")
-    lines.extend(f"  {entry}" for entry in availability["camera_details"]) 
-    lines.append(f"Robot arm: {availability['robot_arm']}")
-    lines.extend(f"  {entry}" for entry in availability["robot_arm_details"]) 
+            user = session['user'][:8]
+            tty = session['tty'][:5]
+            login_time = session['login_time'][:16]
+            duration = session.get('duration', '?')[:11]
+            host = session.get('host', '-')[:14]
+            
+            processes = get_user_processes(session["user"])
+            if not processes:
+                lines.append(f"{user:<8} | {tty:<5} | {login_time:<16} | {duration:<11} | {host:<14} | None")
+            else:
+                for i, proc in enumerate(processes[:5]):
+                    proc_cmd = (proc['command'] + " " + proc['args']).replace(" /opt/ros/humble/bin/", "")
+                    proc_cmd = proc_cmd[:24] + ".." if len(proc_cmd) > 26 else proc_cmd
+                    
+                    if i == 0:
+                        lines.append(f"{user:<8} | {tty:<5} | {login_time:<16} | {duration:<11} | {host:<14} | {proc_cmd}")
+                    else:
+                        lines.append(f"{'':<8} | {'':<5} | {'':<16} | {'':<11} | {'':<14} | {proc_cmd}")
+
+    lines.append("=" * 90)
+    lines.append(f"RESOURCE AVAILABILITY:")
+    lines.append(f"  Camera:    {availability['camera'].upper()}")
+    lines.append(f"  Robot Arm: {availability['robot_arm'].upper()}")
+    
+    if availability['robot_arm'] == "in use" and availability['robot_arm_details']:
+        lines.append("\n  Active Robot Processes:")
+        for entry in availability['robot_arm_details']:
+            if entry.startswith("ROS 2") or entry.startswith("Potential"):
+                continue
+            clean_entry = entry.replace("/usr/bin/python3 /opt/ros/humble/bin/", "")
+            clean_entry = clean_entry.replace("/home/kinova/ros2_kortex_ws/install/", "")
+            lines.append(f"    - {clean_entry[:90]}")
+            
     return "\n".join(lines)
 
 
