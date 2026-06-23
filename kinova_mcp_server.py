@@ -79,7 +79,11 @@ def clear_robot_faults() -> str:
     return "[Stub] Fault clearing not implemented. Use Kortex API."
 
 @mcp.tool()
-def remote_ssh_exec(command: str, host: str = "kinova@10.12.140.145") -> str:
+def remote_ssh_exec(
+    command: str,
+    host: str = "kinova@10.12.140.145",
+    timeout: int = 60,
+) -> str:
     """
     Execute a command on the remote Kinova desktop via SSH.
     """
@@ -96,7 +100,7 @@ def remote_ssh_exec(command: str, host: str = "kinova@10.12.140.145") -> str:
             ],
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=timeout
         )
         if result.returncode == 0:
             return result.stdout
@@ -139,7 +143,8 @@ def inspect_installed_packages(
         )
     if include_python:
         section_commands.append("echo '\n=== PYTHON PACKAGES ==='")
-        section_commands.append(f"{shlex.quote(sys.executable)} -m pip list --format=columns || true")
+        python_cmd = "python3" if context == "remote" else shlex.quote(sys.executable)
+        section_commands.append(f"{python_cmd} -m pip list --format=columns || true")
     if include_ros:
         section_commands.append("echo '\n=== ROS 1 PACKAGES ==='")
         section_commands.append(
@@ -171,6 +176,7 @@ def install_packages_ssh(
     manager: str = "apt",
     host: str = "kinova@10.12.140.145",
     use_sudo: bool = True,
+    timeout: int = 300,
 ) -> str:
     """
     Install packages on the remote host via SSH.
@@ -180,6 +186,7 @@ def install_packages_ssh(
       - manager: 'apt' or 'pip'
       - host: remote SSH host
       - use_sudo: whether to run installation with sudo (for apt)
+      - timeout: SSH command timeout in seconds
     """
     if not packages.strip():
         return "No packages specified."
@@ -193,7 +200,7 @@ def install_packages_ssh(
     else:
         return "Unsupported manager. Use 'apt' or 'pip'."
 
-    return remote_ssh_exec(remote_command, host)
+    return remote_ssh_exec(remote_command, host, timeout=timeout)
 
 @mcp.tool()
 def scp_upload(local_path: str, remote_path: str, host: str = "kinova@10.12.140.145") -> str:
