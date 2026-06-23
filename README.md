@@ -61,6 +61,8 @@ The `kinova_mcp_server.py` provides the following tools. You will need to fill i
 - `fetch_kinova_diagnostics`: Reads logs from the Kinova controller.
 - `clear_robot_faults`: Clears protective stops.
 - `remote_ssh_exec`: Run a shell command on the remote Kinova desktop at `kinova@10.12.140.145`.
+- `inspect_installed_packages`: Inspect installed packages locally or remotely, including system packages, Python packages, ROS 1 packages, and ROS 2 packages.
+- `install_packages_ssh`: Install packages remotely via SSH using `apt` or `pip`.
 - `scp_upload`: Copy a local file or directory to the remote host.
 - `scp_download`: Copy a file or directory from the remote host to local storage.
 - `rsync_to_remote`: Sync a local path to the remote host.
