@@ -1,0 +1,14 @@
+[Unit]
+Description=Kinova Login and Resource Activity Monitor
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env python3 /home/kamren/Kinova_MCP_tools/login_activity_monitor.py --output /var/log/kinova_session_report.log
+User=kinova
+Group=kinova
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
