@@ -1,6 +1,8 @@
 import os
+import signal
 import shutil
 import subprocess
+import tempfile
 import json
 import shlex
 import sys
@@ -381,29 +383,89 @@ def _find_colcon_log_file(workspace_path: str) -> str | None:
     return max(candidates, key=os.path.getmtime)
 
 
+def _tail_file_path(file_path: str, max_lines: int) -> tuple[str, bool]:
+    if max_lines <= 0:
+        return "", False
+
+    block_size = 8192
+    with open(file_path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        file_size = f.tell()
+        if file_size == 0:
+            return "", False
+
+        data = bytearray()
+        lines_found = 0
+        pos = file_size
+        while pos > 0 and lines_found <= max_lines:
+            read_size = min(block_size, pos)
+            pos -= read_size
+            f.seek(pos)
+            chunk = f.read(read_size)
+            data[:0] = chunk
+            lines_found += chunk.count(b"\n")
+
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines(keepends=True)
+    if len(lines) <= max_lines:
+        return text, False
+    return "".join(lines[-max_lines:]), True
+
+
+def _tail_file_obj(file_obj, max_lines: int) -> str:
+    if max_lines <= 0:
+        return ""
+
+    block_size = 8192
+    file_obj.seek(0, os.SEEK_END)
+    pos = file_obj.tell()
+    if pos == 0:
+        return ""
+
+    data = bytearray()
+    lines_found = 0
+    while pos > 0 and lines_found <= max_lines:
+        read_size = min(block_size, pos)
+        pos -= read_size
+        file_obj.seek(pos)
+        chunk = file_obj.read(read_size)
+        data[:0] = chunk
+        lines_found += chunk.count(b"\n")
+
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines(keepends=True)
+    if len(lines) <= max_lines:
+        return text
+    return "".join(lines[-max_lines:])
+
+
 def _read_latest_colcon_log(workspace_path: str, max_lines: int = 200) -> str:
     log_file = _find_colcon_log_file(workspace_path)
     if not log_file:
         return "No colcon log file found in this workspace."
 
+    if max_lines <= 0:
+        return (
+            f"Latest log file: {os.path.relpath(log_file, workspace_path)}\n"
+            f"--- no log lines requested (max_lines={max_lines}) ---"
+        )
+
     try:
-        with open(log_file, "r", encoding="utf-8", errors="replace") as log_handle:
-            lines = log_handle.readlines()
+        tail_text, truncated = _tail_file_path(log_file, max_lines)
     except Exception as exc:
         return f"Error reading latest colcon log {log_file}: {exc}"
 
-    if len(lines) > max_lines:
-        tail = "".join(lines[-max_lines:])
+    if truncated:
         return (
             f"Latest log file: {os.path.relpath(log_file, workspace_path)}\n"
             f"--- last {max_lines} lines ---\n"
-            f"{tail}"
+            f"{tail_text}"
         )
 
     return (
         f"Latest log file: {os.path.relpath(log_file, workspace_path)}\n"
         f"--- full contents ---\n"
-        f"{''.join(lines)}"
+        f"{tail_text}"
     )
 
 
@@ -419,7 +481,7 @@ def _find_active_colcon_processes() -> list[str]:
         processes = []
         for line in result.stdout.splitlines():
             lower_line = line.lower()
-            if "colcon" in lower_line and "python" not in lower_line:
+            if "colcon" in lower_line:
                 processes.append(line.strip())
         return processes
     except Exception:
@@ -501,31 +563,59 @@ def colcon_build(
         return "colcon is not available on PATH. Install colcon or adjust PATH for this server process."
 
     cmd = ["colcon", "build"]
-    if packages.strip():
-        for package in shlex.split(packages):
-            cmd.extend(["--packages-select", package])
-    if extra_args.strip():
-        cmd.extend(shlex.split(extra_args))
-
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        package_list = shlex.split(packages) if packages.strip() else []
+        extra_args_list = shlex.split(extra_args) if extra_args.strip() else []
+        if package_list:
+            cmd.extend(["--packages-select", *package_list])
+        if extra_args_list:
+            cmd.extend(extra_args_list)
+
+        with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(mode="w+b") as stderr_file:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=workspace,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                start_new_session=True,
+            )
+            try:
+                proc.wait(timeout=timeout)
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except Exception:
+                    pass
+                try:
+                    proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except Exception:
+                        pass
+                    proc.wait()
+                timed_out = True
+
+            stdout_file.flush()
+            stderr_file.flush()
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout_tail = _tail_file_obj(stdout_file, 200)
+            stderr_tail = _tail_file_obj(stderr_file, 200)
+
         output = []
         output.append(f"Running: {' '.join(shlex.quote(c) for c in cmd)}")
         output.append(f"Workspace: {workspace}")
         output.append("--- stdout ---")
-        output.append(result.stdout or "<no stdout>")
+        output.append(stdout_tail or "<no stdout>")
         output.append("--- stderr ---")
-        output.append(result.stderr or "<no stderr>")
-        output.append(f"Exit code: {result.returncode}")
+        output.append(stderr_tail or "<no stderr>")
+        if timed_out:
+            output.append(f"Exit code: timed out after {timeout} seconds")
+        else:
+            output.append(f"Exit code: {proc.returncode}")
         return "\n".join(output)
-    except subprocess.TimeoutExpired as exc:
-        return f"colcon build timed out after {timeout} seconds. Partial output:\n{exc.stdout or ''}\n{exc.stderr or ''}"
     except Exception as exc:
         return f"Exception while running colcon build: {exc}"
 
@@ -554,31 +644,59 @@ def colcon_test(
         return "colcon is not available on PATH. Install colcon or adjust PATH for this server process."
 
     cmd = ["colcon", "test"]
-    if packages.strip():
-        for package in shlex.split(packages):
-            cmd.extend(["--packages-select", package])
-    if extra_args.strip():
-        cmd.extend(shlex.split(extra_args))
-
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        package_list = shlex.split(packages) if packages.strip() else []
+        extra_args_list = shlex.split(extra_args) if extra_args.strip() else []
+        if package_list:
+            cmd.extend(["--packages-select", *package_list])
+        if extra_args_list:
+            cmd.extend(extra_args_list)
+
+        with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(mode="w+b") as stderr_file:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=workspace,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                start_new_session=True,
+            )
+            try:
+                proc.wait(timeout=timeout)
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except Exception:
+                    pass
+                try:
+                    proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except Exception:
+                        pass
+                    proc.wait()
+                timed_out = True
+
+            stdout_file.flush()
+            stderr_file.flush()
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout_tail = _tail_file_obj(stdout_file, 200)
+            stderr_tail = _tail_file_obj(stderr_file, 200)
+
         output = []
         output.append(f"Running: {' '.join(shlex.quote(c) for c in cmd)}")
         output.append(f"Workspace: {workspace}")
         output.append("--- stdout ---")
-        output.append(result.stdout or "<no stdout>")
+        output.append(stdout_tail or "<no stdout>")
         output.append("--- stderr ---")
-        output.append(result.stderr or "<no stderr>")
-        output.append(f"Exit code: {result.returncode}")
+        output.append(stderr_tail or "<no stderr>")
+        if timed_out:
+            output.append(f"Exit code: timed out after {timeout} seconds")
+        else:
+            output.append(f"Exit code: {proc.returncode}")
         return "\n".join(output)
-    except subprocess.TimeoutExpired as exc:
-        return f"colcon test timed out after {timeout} seconds. Partial output:\n{exc.stdout or ''}\n{exc.stderr or ''}"
     except Exception as exc:
         return f"Exception while running colcon test: {exc}"
 
