@@ -50,6 +50,18 @@ Example configuration:
 ```
 *Note: Make sure to point the `command` to the python executable where `mcp` is installed, and ensure the necessary ROS 2 environment variables are sourced or provided in the `env` block.*
 
+## Using the colcon tools from Claude
+
+- Start the MCP server from the workspace root or pass an absolute `workspace_path` when calling tools.
+- Ensure the Python environment running the server has both `mcp` and `colcon` installed and available on `PATH`.
+- Recommended tool calls:
+  - `colcon_status(workspace_path="/home/kamren/Kinova_MCP_tools")`
+  - `colcon_build(workspace_path="/home/kamren/Kinova_MCP_tools")`
+  - `colcon_test(workspace_path="/home/kamren/Kinova_MCP_tools")`
+  - `colcon_latest_log(workspace_path="/home/kamren/Kinova_MCP_tools", max_lines=200)`
+
+These tools work through Claude as long as the MCP server is reachable and the configured process has access to the workspace and `colcon` binary.
+
 ## Available Tools (Current Stubs)
 
 The `kinova_mcp_server.py` provides the following tools. You will need to fill in the actual `subprocess` or `rclpy` logic for some of them.
