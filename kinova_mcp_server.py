@@ -1,8 +1,10 @@
 import os
+import shutil
 import subprocess
 import json
 import shlex
 import sys
+from datetime import datetime
 from mcp.server.fastmcp import FastMCP
 
 # Create an MCP server for Kinova Gen3
@@ -343,6 +345,242 @@ for dev in /dev/video*; do
  done
 """
     return remote_ssh_exec(remote_command, host)
+
+def _resolve_workspace_path(workspace_path: str) -> str:
+    workspace_path = workspace_path or "."
+    abs_path = os.path.abspath(os.path.expanduser(workspace_path))
+    if not os.path.isdir(abs_path):
+        raise ValueError(f"Workspace path does not exist or is not a directory: {abs_path}")
+    return abs_path
+
+def _find_last_colcon_build_time(workspace_path: str) -> str:
+    candidates = []
+    for name in ["log/latest_build", "build", "install"]:
+        path = os.path.join(workspace_path, name)
+        if os.path.exists(path):
+            candidates.append(path)
+    if not candidates:
+        return "No colcon build artifacts found in this workspace."
+
+    latest = max(candidates, key=lambda p: os.path.getmtime(p))
+    timestamp = datetime.fromtimestamp(os.path.getmtime(latest))
+    return f"{timestamp.strftime('%Y-%m-%d %H:%M:%S')} (artifact: {os.path.relpath(latest, workspace_path)})"
+
+def _find_colcon_log_file(workspace_path: str) -> str | None:
+    log_dir = os.path.join(workspace_path, "log")
+    if not os.path.isdir(log_dir):
+        return None
+
+    candidates = []
+    for root, _, files in os.walk(log_dir):
+        for file_name in files:
+            if file_name.endswith(".log"):
+                candidates.append(os.path.join(root, file_name))
+    if not candidates:
+        return None
+    return max(candidates, key=os.path.getmtime)
+
+
+def _read_latest_colcon_log(workspace_path: str, max_lines: int = 200) -> str:
+    log_file = _find_colcon_log_file(workspace_path)
+    if not log_file:
+        return "No colcon log file found in this workspace."
+
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as log_handle:
+            lines = log_handle.readlines()
+    except Exception as exc:
+        return f"Error reading latest colcon log {log_file}: {exc}"
+
+    if len(lines) > max_lines:
+        tail = "".join(lines[-max_lines:])
+        return (
+            f"Latest log file: {os.path.relpath(log_file, workspace_path)}\n"
+            f"--- last {max_lines} lines ---\n"
+            f"{tail}"
+        )
+
+    return (
+        f"Latest log file: {os.path.relpath(log_file, workspace_path)}\n"
+        f"--- full contents ---\n"
+        f"{''.join(lines)}"
+    )
+
+
+def _find_active_colcon_processes() -> list[str]:
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,cmd"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        processes = []
+        for line in result.stdout.splitlines():
+            lower_line = line.lower()
+            if "colcon" in lower_line and "python" not in lower_line:
+                processes.append(line.strip())
+        return processes
+    except Exception:
+        return []
+
+@mcp.tool()
+def colcon_status(workspace_path: str = ".") -> str:
+    """
+    Check the status of a colcon build in the given workspace.
+    Returns whether a colcon build process is active and the timestamp of the last build.
+    """
+    try:
+        workspace = _resolve_workspace_path(workspace_path)
+    except ValueError as exc:
+        return str(exc)
+
+    active_processes = _find_active_colcon_processes()
+    status_lines = []
+    if active_processes:
+        status_lines.append("Active colcon processes detected:")
+        status_lines.extend(active_processes)
+    else:
+        status_lines.append("No active colcon build process detected.")
+
+    status_lines.append(f"Last build time: {_find_last_colcon_build_time(workspace)}")
+    log_file = _find_colcon_log_file(workspace)
+    if log_file:
+        status_lines.append(f"Latest colcon log file: {os.path.relpath(log_file, workspace)}")
+    return "\n".join(status_lines)
+
+@mcp.tool()
+def colcon_last_build_time(workspace_path: str = ".") -> str:
+    """
+    Return the timestamp of the last colcon build artifacts found in the workspace.
+    """
+    try:
+        workspace = _resolve_workspace_path(workspace_path)
+    except ValueError as exc:
+        return str(exc)
+    return _find_last_colcon_build_time(workspace)
+
+@mcp.tool()
+def colcon_latest_log(workspace_path: str = ".", max_lines: int = 200) -> str:
+    """
+    Return the latest colcon log file contents from the workspace.
+
+    Arguments:
+      - workspace_path: path to the ROS 2 workspace.
+      - max_lines: limit returned content to the last N log lines.
+    """
+    try:
+        workspace = _resolve_workspace_path(workspace_path)
+    except ValueError as exc:
+        return str(exc)
+    return _read_latest_colcon_log(workspace, max_lines)
+
+@mcp.tool()
+def colcon_build(
+    workspace_path: str = ".",
+    packages: str = "",
+    extra_args: str = "",
+    timeout: int = 1800,
+) -> str:
+    """
+    Run colcon build in the specified workspace.
+
+    Arguments:
+      - workspace_path: path to the ROS 2 workspace.
+      - packages: space-separated package names to pass as --packages-select.
+      - extra_args: additional colcon CLI arguments.
+      - timeout: command timeout in seconds.
+    """
+    try:
+        workspace = _resolve_workspace_path(workspace_path)
+    except ValueError as exc:
+        return str(exc)
+
+    if not shutil.which("colcon"):
+        return "colcon is not available on PATH. Install colcon or adjust PATH for this server process."
+
+    cmd = ["colcon", "build"]
+    if packages.strip():
+        for package in shlex.split(packages):
+            cmd.extend(["--packages-select", package])
+    if extra_args.strip():
+        cmd.extend(shlex.split(extra_args))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        output = []
+        output.append(f"Running: {' '.join(shlex.quote(c) for c in cmd)}")
+        output.append(f"Workspace: {workspace}")
+        output.append("--- stdout ---")
+        output.append(result.stdout or "<no stdout>")
+        output.append("--- stderr ---")
+        output.append(result.stderr or "<no stderr>")
+        output.append(f"Exit code: {result.returncode}")
+        return "\n".join(output)
+    except subprocess.TimeoutExpired as exc:
+        return f"colcon build timed out after {timeout} seconds. Partial output:\n{exc.stdout or ''}\n{exc.stderr or ''}"
+    except Exception as exc:
+        return f"Exception while running colcon build: {exc}"
+
+@mcp.tool()
+def colcon_test(
+    workspace_path: str = ".",
+    packages: str = "",
+    extra_args: str = "",
+    timeout: int = 1800,
+) -> str:
+    """
+    Run colcon test in the specified workspace.
+
+    Arguments:
+      - workspace_path: path to the ROS 2 workspace.
+      - packages: space-separated package names to pass as --packages-select.
+      - extra_args: additional colcon CLI arguments.
+      - timeout: command timeout in seconds.
+    """
+    try:
+        workspace = _resolve_workspace_path(workspace_path)
+    except ValueError as exc:
+        return str(exc)
+
+    if not shutil.which("colcon"):
+        return "colcon is not available on PATH. Install colcon or adjust PATH for this server process."
+
+    cmd = ["colcon", "test"]
+    if packages.strip():
+        for package in shlex.split(packages):
+            cmd.extend(["--packages-select", package])
+    if extra_args.strip():
+        cmd.extend(shlex.split(extra_args))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        output = []
+        output.append(f"Running: {' '.join(shlex.quote(c) for c in cmd)}")
+        output.append(f"Workspace: {workspace}")
+        output.append("--- stdout ---")
+        output.append(result.stdout or "<no stdout>")
+        output.append("--- stderr ---")
+        output.append(result.stderr or "<no stderr>")
+        output.append(f"Exit code: {result.returncode}")
+        return "\n".join(output)
+    except subprocess.TimeoutExpired as exc:
+        return f"colcon test timed out after {timeout} seconds. Partial output:\n{exc.stdout or ''}\n{exc.stderr or ''}"
+    except Exception as exc:
+        return f"Exception while running colcon test: {exc}"
 
 if __name__ == "__main__":
     # Initialize and run the server using standard stdio transport for MCP

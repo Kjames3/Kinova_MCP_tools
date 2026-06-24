@@ -68,6 +68,11 @@ The `kinova_mcp_server.py` provides the following tools. You will need to fill i
 - `rsync_to_remote`: Sync a local path to the remote host.
 - `rsync_from_remote`: Sync a remote path from the remote host to local storage.
 - `check_remote_usage_status`: Check current remote users, SSH sessions, ROS node/topic activity, and camera device usage.
+- `colcon_status`: Check whether `colcon` is currently running and report the last build time and latest log file.
+- `colcon_last_build_time`: Return the timestamp of the latest colcon build artifacts.
+- `colcon_build`: Run `colcon build` in the workspace, optionally selecting packages and passing extra arguments.
+- `colcon_test`: Run `colcon test` in the workspace, optionally selecting packages and passing extra arguments.
+- `colcon_latest_log`: Return the contents of the latest colcon log file, limited to the last N lines.
 
 ## Remote access notes
 

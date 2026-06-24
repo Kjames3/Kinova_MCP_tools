@@ -139,6 +139,19 @@ def get_availability_report():
 
 
 def format_session_report(sessions, availability):
+    import socket
+    
+    def resolve_hostname(ip_or_host):
+        if not ip_or_host or ip_or_host == '-':
+            return '-'
+        try:
+            # Try to resolve if it's an IP, otherwise return as is
+            hostname = socket.gethostbyaddr(ip_or_host)[0]
+            # Optionally split off domain for brevity
+            return hostname.split('.')[0]
+        except Exception:
+            return ip_or_host
+
     lines = []
     lines.append(f"Kinova Session Report: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("=" * 90)
@@ -153,18 +166,20 @@ def format_session_report(sessions, availability):
             tty = session['tty'][:5]
             login_time = session['login_time'][:16]
             duration = session.get('duration', '?')[:11]
-            host = session.get('host', '-')[:14]
+            
+            raw_host = session.get('host', '-')
+            resolved_host = resolve_hostname(raw_host)[:14]
             
             processes = get_user_processes(session["user"])
             if not processes:
-                lines.append(f"{user:<8} | {tty:<5} | {login_time:<16} | {duration:<11} | {host:<14} | None")
+                lines.append(f"{user:<8} | {tty:<5} | {login_time:<16} | {duration:<11} | {resolved_host:<14} | None")
             else:
                 for i, proc in enumerate(processes[:5]):
                     proc_cmd = (proc['command'] + " " + proc['args']).replace(" /opt/ros/humble/bin/", "")
                     proc_cmd = proc_cmd[:24] + ".." if len(proc_cmd) > 26 else proc_cmd
                     
                     if i == 0:
-                        lines.append(f"{user:<8} | {tty:<5} | {login_time:<16} | {duration:<11} | {host:<14} | {proc_cmd}")
+                        lines.append(f"{user:<8} | {tty:<5} | {login_time:<16} | {duration:<11} | {resolved_host:<14} | {proc_cmd}")
                     else:
                         lines.append(f"{'':<8} | {'':<5} | {'':<16} | {'':<11} | {'':<14} | {proc_cmd}")
 
