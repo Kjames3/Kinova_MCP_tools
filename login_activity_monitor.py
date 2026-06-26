@@ -116,10 +116,11 @@ def get_robot_arm_usage():
             status.append("ROS 2 topics that may indicate arm/camera usage:")
             status.extend(topic_output.splitlines())
     if shutil.which("pgrep"):
-        processes = run_command("pgrep -af 'ros2|kortex|python.*camera|python.*arm' || true")
-        if processes:
+        processes = run_command("pgrep -af 'kortex|python.*camera|python.*arm' 2>/dev/null | grep -v 'pgrep -af' || true")
+        filtered = [line for line in processes.splitlines() if line.strip() and 'pgrep -af' not in line and 'grep -v' not in line]
+        if filtered:
             status.append("Potential arm/camera-related processes:")
-            status.extend(processes.splitlines())
+            status.extend(filtered)
     if not status:
         status.append("No arm or camera-specific ROS/process usage detected.")
     return status
@@ -129,7 +130,11 @@ def get_availability_report():
     camera_status = get_camera_usage()
     arm_status = get_robot_arm_usage()
     camera_in_use = any("lsof" not in line and "/dev/video" in line for line in camera_status)
-    arm_in_use = any("ros2" in line or "kortex" in line or "arm" in line for line in arm_status)
+    arm_in_use = any(
+        re.search(r"\b(kortex|python.*camera|python.*arm|joint|camera|kinova)\b", line, re.I)
+        for line in arm_status
+        if not line.startswith("ROS 2 topics") and not line.startswith("Potential")
+    )
     return {
         "camera": "in use" if camera_in_use else "available",
         "robot_arm": "in use" if arm_in_use else "available",

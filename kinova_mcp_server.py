@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import json
+import re
 import shlex
 import sys
 from datetime import datetime
@@ -11,6 +12,7 @@ from mcp.server.fastmcp import FastMCP
 
 # Create an MCP server for Kinova Gen3
 mcp = FastMCP("Kinova MCP Tools")
+_ros2_launch_processes: dict[str, subprocess.Popen] = {}
 
 @mcp.tool()
 def get_robot_state() -> str:
@@ -347,6 +349,392 @@ for dev in /dev/video*; do
  done
 """
     return remote_ssh_exec(remote_command, host)
+
+@mcp.tool()
+def ros2_launch_manage(
+    package: str,
+    launch_file: str,
+    action: str = "start",
+    extra_args: str = "",
+    workspace_path: str = ".",
+) -> str:
+    """
+    Start or stop a ROS 2 launch file and track the process.
+
+    Arguments:
+      - package: ROS 2 package name containing the launch file.
+      - launch_file: Launch file name.
+      - action: "start" or "stop".
+      - extra_args: extra arguments to pass to ros2 launch.
+      - workspace_path: workspace root for relative launch paths.
+    """
+    try:
+        workspace = _resolve_workspace_path(workspace_path)
+    except ValueError as exc:
+        return str(exc)
+
+    key = f"{package}:{launch_file}"
+    if action == "start":
+        if key in _ros2_launch_processes:
+            proc = _ros2_launch_processes[key]
+            if proc.poll() is None:
+                return f"Launch already running: {key} (pid {proc.pid})"
+            del _ros2_launch_processes[key]
+
+        cmd = ["ros2", "launch", package, launch_file]
+        if extra_args.strip():
+            cmd.extend(shlex.split(extra_args))
+
+        try:
+            stdout_file = tempfile.TemporaryFile(mode="w+b")
+            stderr_file = tempfile.TemporaryFile(mode="w+b")
+            proc = subprocess.Popen(
+                cmd,
+                cwd=workspace,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                start_new_session=True,
+            )
+            _ros2_launch_processes[key] = proc
+            return f"Started launch {key} with PID {proc.pid}."
+        except Exception as exc:
+            return f"Failed to start launch {key}: {exc}"
+    elif action == "stop":
+        proc = _ros2_launch_processes.get(key)
+        if proc and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except Exception:
+                pass
+            try:
+                proc.wait(5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+                proc.wait()
+            del _ros2_launch_processes[key]
+            return f"Stopped launch {key}."
+
+        # Fallback to pkill if the tracked process is missing.
+        try:
+            result = subprocess.run(
+                ["pkill", "-f", f"ros2 launch {package} {launch_file}"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                return f"Stopped launch {key} via pkill."
+            return f"No running launch process found for {key}."
+        except Exception as exc:
+            return f"Error stopping launch {key}: {exc}"
+    return "Invalid action. Use 'start' or 'stop'."
+
+@mcp.tool()
+def workspace_source_status(workspace_path: str = ".") -> str:
+    """
+    Check whether a ROS 2 workspace is sourced correctly.
+    """
+    try:
+        workspace = _resolve_workspace_path(workspace_path)
+    except ValueError as exc:
+        return str(exc)
+
+    setup_path = os.path.join(workspace, "install", "setup.bash")
+    if not os.path.isfile(setup_path):
+        return f"Workspace setup file not found: {setup_path}"
+
+    cmd = (
+        "bash -lc 'source "
+        + shlex.quote(setup_path)
+        + " >/dev/null 2>&1 && python3 - <<\'PY\'\nimport os, json\nprint(json.dumps({\"AMENT_PREFIX_PATH\": os.getenv(\"AMENT_PREFIX_PATH\"), \"PYTHONPATH\": os.getenv(\"PYTHONPATH\"), \"COLCON_PREFIX_PATH\": os.getenv(\"COLCON_PREFIX_PATH\"), \"ROS_PACKAGE_PATH\": os.getenv(\"ROS_PACKAGE_PATH\")}))\nPY'"
+    )
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return f"Workspace source check failed: {result.stderr.strip()}"
+        env_json = json.loads(result.stdout.strip())
+        lines = [f"Workspace sourced from {setup_path}"]
+        for name, value in env_json.items():
+            lines.append(f"{name}: {value or '<not set>'}")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Workspace source status error: {exc}"
+
+@mcp.tool()
+def colcon_build_status(workspace_path: str = ".") -> str:
+    """
+    Summarize the latest colcon build log for warnings and errors.
+    """
+    try:
+        workspace = _resolve_workspace_path(workspace_path)
+    except ValueError as exc:
+        return str(exc)
+
+    log_file = _find_colcon_log_file(workspace)
+    if not log_file:
+        return "No colcon log file found in this workspace."
+
+    try:
+        tail_text, truncated = _tail_file_path(log_file, 1000)
+        lines = tail_text.splitlines()
+        errors = [line for line in lines if re.search(r"\b(error|failed?)\b", line, re.I)]
+        warnings = [line for line in lines if re.search(r"\bwarning\b", line, re.I)]
+        summary = [f"Latest log file: {os.path.relpath(log_file, workspace)}"]
+        if truncated:
+            summary.append("--- tail of latest log (last 1000 lines) ---")
+        summary.append(f"Errors: {len(errors)}")
+        summary.append(f"Warnings: {len(warnings)}")
+        if errors:
+            summary.append("Last error lines:")
+            summary.extend(errors[-10:])
+        elif warnings:
+            summary.append("Last warning lines:")
+            summary.extend(warnings[-10:])
+        else:
+            summary.append("No error or warning patterns found in the latest log tail.")
+        return "\n".join(summary)
+    except Exception as exc:
+        return f"Error summarizing colcon build log: {exc}"
+
+@mcp.tool()
+def fetch_ros2_nodes_and_topics() -> str:
+    """
+    Return active ROS 2 nodes, topics, and services.
+    """
+    if not shutil.which("ros2"):
+        return "ros2 CLI not available."
+
+    commands = [
+        ["ros2", "node", "list"],
+        ["ros2", "topic", "list"],
+        ["ros2", "service", "list"],
+    ]
+    output = []
+    for cmd in commands:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            label = cmd[1] if len(cmd) > 1 else "ros2"
+            output.append(f"=== {' '.join(cmd)} ===")
+            output.append(result.stdout.strip() or "<none>")
+        except Exception as exc:
+            output.append(f"Error running {' '.join(cmd)}: {exc}")
+    return "\n".join(output)
+
+@mcp.tool()
+def robot_health_summary() -> str:
+    """
+    Collect a summary of ROS 2 robot health and diagnostics.
+    """
+    if not shutil.which("ros2"):
+        return "ros2 CLI not available."
+
+    try:
+        node_result = subprocess.run(
+            ["ros2", "node", "list"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        topic_result = subprocess.run(
+            ["ros2", "topic", "list"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception as exc:
+        return f"Failed to query ROS 2 state: {exc}"
+
+    diagnostics_output = "<diagnostics topic not found>"
+    if "diagnostics" in topic_result.stdout.lower():
+        try:
+            diag_result = subprocess.run(
+                ["ros2", "topic", "echo", "/diagnostics", "--once"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            diagnostics_output = diag_result.stdout.strip()[:2000] or "<diagnostics topic empty>"
+        except Exception:
+            diagnostics_output = "<failed to read /diagnostics>"
+
+    return (
+        "ROS 2 Robot Health Summary:\n"
+        f"Nodes:\n{node_result.stdout.strip() or '<none>'}\n"
+        f"Topics:\n{topic_result.stdout.strip() or '<none>'}\n"
+        f"Diagnostics sample:\n{diagnostics_output}"
+    )
+
+@mcp.tool()
+def camera_snapshot(
+    output_path: str = "/tmp/kinova_camera_snapshot.jpg",
+    device: str = "/dev/video0",
+) -> str:
+    """
+    Capture a single image from the first available camera device.
+    """
+    if not shutil.which("ffmpeg"):
+        return "ffmpeg is not installed."
+
+    if not os.path.exists(device):
+        devices = [dev for dev in ["/dev/video0", "/dev/video1"] if os.path.exists(dev)]
+        if not devices:
+            return "No /dev/video device nodes found."
+        device = devices[0]
+
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "v4l2",
+                "-video_size",
+                "640x480",
+                "-i",
+                device,
+                "-frames:v",
+                "1",
+                output_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            return f"Snapshot saved to {output_path}"
+        return f"ffmpeg failed: {result.stderr.strip()}"
+    except Exception as exc:
+        return f"Failed to capture camera snapshot: {exc}"
+
+@mcp.tool()
+def remote_log_search(
+    keyword: str,
+    path: str = ".",
+    host: str = "",
+    max_matches: int = 50,
+) -> str:
+    """
+    Search local or remote logs for a keyword.
+    """
+    quoted_path = shlex.quote(path)
+    quoted_keyword = shlex.quote(keyword)
+    grep_cmd = f"grep -RIn --exclude-dir=.git --max-count={max_matches} {quoted_keyword} {quoted_path} || true"
+    if host:
+        return remote_ssh_exec(grep_cmd, host)
+    try:
+        result = subprocess.run(
+            grep_cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=path if os.path.isdir(path) else None,
+        )
+        return result.stdout.strip() or f"No matches for {keyword} in {path}."
+    except Exception as exc:
+        return f"Failed searching logs: {exc}"
+
+@mcp.tool()
+def sync_workspace(workspace_path: str = ".", include_diff: bool = False) -> str:
+    """
+    Return git workspace status and optional diff summary.
+    """
+    try:
+        workspace = _resolve_workspace_path(workspace_path)
+    except ValueError as exc:
+        return str(exc)
+
+    if not os.path.isdir(os.path.join(workspace, ".git")):
+        return "Not a git repository."
+
+    status = []
+    try:
+        status_result = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        status.append("=== git status --short ===")
+        status.append(status_result.stdout.strip() or "Clean working tree.")
+        if include_diff:
+            diff_result = subprocess.run(
+                ["git", "diff", "--stat"],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            status.append("=== git diff --stat ===")
+            status.append(diff_result.stdout.strip() or "No diff changes.")
+        return "\n".join(status)
+    except Exception as exc:
+        return f"Workspace sync failed: {exc}"
+
+@mcp.tool()
+def system_resource_report() -> str:
+    """
+    Return a brief system resource usage summary.
+    """
+    parts = []
+    try:
+        uptime = subprocess.run(
+            ["uptime"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        parts.append(f"Uptime: {uptime.stdout.strip()}")
+    except Exception as exc:
+        parts.append(f"Uptime failed: {exc}")
+
+    try:
+        free = subprocess.run(
+            ["free", "-h"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        parts.append("=== Memory ===")
+        parts.append(free.stdout.strip())
+    except Exception as exc:
+        parts.append(f"Memory check failed: {exc}")
+
+    try:
+        df = subprocess.run(
+            ["df", "-h", "."],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        parts.append("=== Disk ===")
+        parts.append(df.stdout.strip())
+    except Exception as exc:
+        parts.append(f"Disk check failed: {exc}")
+
+    if shutil.which("nvidia-smi"):
+        try:
+            nvidia = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            parts.append("=== GPU ===")
+            parts.append(nvidia.stdout.strip() or "No GPU usage data.")
+        except Exception as exc:
+            parts.append(f"GPU check failed: {exc}")
+
+    return "\n".join(parts)
 
 def _resolve_workspace_path(workspace_path: str) -> str:
     workspace_path = workspace_path or "."
