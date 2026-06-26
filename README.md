@@ -85,6 +85,15 @@ The `kinova_mcp_server.py` provides the following tools. You will need to fill i
 - `colcon_build`: Run `colcon build` in the workspace, optionally selecting packages and passing extra arguments.
 - `colcon_test`: Run `colcon test` in the workspace, optionally selecting packages and passing extra arguments.
 - `colcon_latest_log`: Return the contents of the latest colcon log file, limited to the last N lines.
+- `ros2_launch_manage`: Start or stop a ROS 2 launch and track the process for clean shutdown.
+- `workspace_source_status`: Check if the workspace install/setup.bash is present and environment variables are set after sourcing.
+- `colcon_build_status`: Summarize the latest colcon build log for errors and warnings.
+- `fetch_ros2_nodes_and_topics`: List active ROS 2 nodes, topics, and services.
+- `robot_health_summary`: Return a brief robot health summary using ROS 2 diagnostics and node/topic state.
+- `camera_snapshot`: Capture a single camera frame to a local image file.
+- `remote_log_search`: Search local or remote logs for a keyword.
+- `sync_workspace`: Show git status and optional diff summary for the workspace.
+- `system_resource_report`: Report uptime, memory, disk, and optional GPU usage.
 
 ## Remote access notes
 
