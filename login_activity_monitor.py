@@ -131,7 +131,7 @@ def get_availability_report():
     arm_status = get_robot_arm_usage()
     camera_in_use = any("lsof" not in line and "/dev/video" in line for line in camera_status)
     arm_in_use = any(
-        re.search(r"\b(kortex|python.*camera|python.*arm|joint|camera|kinova)\b", line, re.I)
+        re.search(r"(kortex|python.*camera|python.*arm|joint|camera|kinova)", line, re.I)
         for line in arm_status
         if not line.startswith("ROS 2 topics") and not line.startswith("Potential")
     )

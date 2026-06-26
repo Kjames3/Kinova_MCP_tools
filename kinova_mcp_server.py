@@ -419,8 +419,9 @@ def ros2_launch_manage(
 
         # Fallback to pkill if the tracked process is missing.
         try:
+            safe_pattern = re.escape(f"ros2 launch {package} {launch_file}")
             result = subprocess.run(
-                ["pkill", "-f", f"ros2 launch {package} {launch_file}"],
+                ["pkill", "-f", safe_pattern],
                 capture_output=True,
                 text=True,
             )
@@ -445,15 +446,16 @@ def workspace_source_status(workspace_path: str = ".") -> str:
     if not os.path.isfile(setup_path):
         return f"Workspace setup file not found: {setup_path}"
 
-    cmd = (
-        "bash -lc 'source "
-        + shlex.quote(setup_path)
-        + " >/dev/null 2>&1 && python3 - <<\'PY\'\nimport os, json\nprint(json.dumps({\"AMENT_PREFIX_PATH\": os.getenv(\"AMENT_PREFIX_PATH\"), \"PYTHONPATH\": os.getenv(\"PYTHONPATH\"), \"COLCON_PREFIX_PATH\": os.getenv(\"COLCON_PREFIX_PATH\"), \"ROS_PACKAGE_PATH\": os.getenv(\"ROS_PACKAGE_PATH\")}))\nPY'"
+    bash_script = (
+        "source \"$SETUP_PATH\" >/dev/null 2>&1 && python3 - <<'PY'\n"
+        "import os, json\n"
+        "print(json.dumps({\"AMENT_PREFIX_PATH\": os.getenv(\"AMENT_PREFIX_PATH\"), \"PYTHONPATH\": os.getenv(\"PYTHONPATH\"), \"COLCON_PREFIX_PATH\": os.getenv(\"COLCON_PREFIX_PATH\"), \"ROS_PACKAGE_PATH\": os.getenv(\"ROS_PACKAGE_PATH\")}))\n"
+        "PY"
     )
     try:
         result = subprocess.run(
-            cmd,
-            shell=True,
+            ["bash", "-lc", bash_script],
+            env={**os.environ, "SETUP_PATH": setup_path},
             capture_output=True,
             text=True,
             timeout=30,
@@ -523,7 +525,11 @@ def fetch_ros2_nodes_and_topics() -> str:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
             label = cmd[1] if len(cmd) > 1 else "ros2"
             output.append(f"=== {' '.join(cmd)} ===")
-            output.append(result.stdout.strip() or "<none>")
+            if result.returncode != 0:
+                stderr = result.stderr.strip() or "<no stderr>"
+                output.append(f"Command failed (exit {result.returncode}): {stderr}")
+            else:
+                output.append(result.stdout.strip() or "<none>")
         except Exception as exc:
             output.append(f"Error running {' '.join(cmd)}: {exc}")
     return "\n".join(output)
@@ -552,8 +558,18 @@ def robot_health_summary() -> str:
     except Exception as exc:
         return f"Failed to query ROS 2 state: {exc}"
 
+    if node_result.returncode != 0:
+        node_section = f"ros2 node list failed (exit {node_result.returncode}): {node_result.stderr.strip() or '<no stderr>'}"
+    else:
+        node_section = node_result.stdout.strip() or "<none>"
+
+    if topic_result.returncode != 0:
+        topic_section = f"ros2 topic list failed (exit {topic_result.returncode}): {topic_result.stderr.strip() or '<no stderr>'}"
+    else:
+        topic_section = topic_result.stdout.strip() or "<none>"
+
     diagnostics_output = "<diagnostics topic not found>"
-    if "diagnostics" in topic_result.stdout.lower():
+    if topic_result.returncode == 0 and "diagnostics" in topic_result.stdout.lower():
         try:
             diag_result = subprocess.run(
                 ["ros2", "topic", "echo", "/diagnostics", "--once"],
@@ -561,14 +577,17 @@ def robot_health_summary() -> str:
                 text=True,
                 timeout=20,
             )
-            diagnostics_output = diag_result.stdout.strip()[:2000] or "<diagnostics topic empty>"
-        except Exception:
-            diagnostics_output = "<failed to read /diagnostics>"
+            if diag_result.returncode != 0:
+                diagnostics_output = f"/diagnostics echo failed (exit {diag_result.returncode}): {diag_result.stderr.strip() or '<no stderr>'}"
+            else:
+                diagnostics_output = diag_result.stdout.strip()[:2000] or "<diagnostics topic empty>"
+        except Exception as exc:
+            diagnostics_output = f"<failed to read /diagnostics: {exc}>"
 
     return (
         "ROS 2 Robot Health Summary:\n"
-        f"Nodes:\n{node_result.stdout.strip() or '<none>'}\n"
-        f"Topics:\n{topic_result.stdout.strip() or '<none>'}\n"
+        f"Nodes:\n{node_section}\n"
+        f"Topics:\n{topic_section}\n"
         f"Diagnostics sample:\n{diagnostics_output}"
     )
 
@@ -624,20 +643,31 @@ def remote_log_search(
     """
     Search local or remote logs for a keyword.
     """
-    quoted_path = shlex.quote(path)
-    quoted_keyword = shlex.quote(keyword)
-    grep_cmd = f"grep -RIn --exclude-dir=.git --max-count={max_matches} {quoted_keyword} {quoted_path} || true"
+    try:
+        max_matches = int(max_matches)
+    except (TypeError, ValueError):
+        max_matches = 50
+    max_matches = max(1, min(max_matches, 200))
+
     if host:
-        return remote_ssh_exec(grep_cmd, host)
+        quoted_path = shlex.quote(path)
+        quoted_keyword = shlex.quote(keyword)
+        search_cmd = f"grep -RIn --exclude-dir=.git --max-count={max_matches} {quoted_keyword} {quoted_path} || true"
+        return remote_ssh_exec(search_cmd, host)
+
+    if not os.path.isdir(path):
+        return f"Search path does not exist: {path}"
+
     try:
         result = subprocess.run(
-            grep_cmd,
-            shell=True,
+            ["grep", "-RIn", "--exclude-dir=.git", f"--max-count={max_matches}", keyword, path],
             capture_output=True,
             text=True,
             timeout=30,
-            cwd=path if os.path.isdir(path) else None,
         )
+        if result.returncode not in (0, 1):
+            stderr = result.stderr.strip() or "<no stderr>"
+            return f"grep failed (exit {result.returncode}): {stderr}"
         return result.stdout.strip() or f"No matches for {keyword} in {path}."
     except Exception as exc:
         return f"Failed searching logs: {exc}"
@@ -665,7 +695,10 @@ def sync_workspace(workspace_path: str = ".", include_diff: bool = False) -> str
             timeout=20,
         )
         status.append("=== git status --short ===")
-        status.append(status_result.stdout.strip() or "Clean working tree.")
+        if status_result.returncode != 0:
+            status.append(f"git status failed (exit {status_result.returncode}): {status_result.stderr.strip()}")
+        else:
+            status.append(status_result.stdout.strip() or "Clean working tree.")
         if include_diff:
             diff_result = subprocess.run(
                 ["git", "diff", "--stat"],
@@ -675,7 +708,10 @@ def sync_workspace(workspace_path: str = ".", include_diff: bool = False) -> str
                 timeout=20,
             )
             status.append("=== git diff --stat ===")
-            status.append(diff_result.stdout.strip() or "No diff changes.")
+            if diff_result.returncode != 0:
+                status.append(f"git diff failed (exit {diff_result.returncode}): {diff_result.stderr.strip()}")
+            else:
+                status.append(diff_result.stdout.strip() or "No diff changes.")
         return "\n".join(status)
     except Exception as exc:
         return f"Workspace sync failed: {exc}"
