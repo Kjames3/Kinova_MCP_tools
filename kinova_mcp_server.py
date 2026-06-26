@@ -454,7 +454,7 @@ def workspace_source_status(workspace_path: str = ".") -> str:
     )
     try:
         result = subprocess.run(
-            ["bash", "-lc", bash_script],
+            ["bash", "-c", bash_script],
             env={**os.environ, "SETUP_PATH": setup_path},
             capture_output=True,
             text=True,
@@ -569,14 +569,16 @@ def robot_health_summary() -> str:
         topic_section = topic_result.stdout.strip() or "<none>"
 
     diagnostics_output = "<diagnostics topic not found>"
-    if topic_result.returncode == 0 and "diagnostics" in topic_result.stdout.lower():
-        try:
-            diag_result = subprocess.run(
-                ["ros2", "topic", "echo", "/diagnostics", "--once"],
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
+    if topic_result.returncode == 0:
+        topics = {line.strip() for line in topic_result.stdout.splitlines() if line.strip()}
+        if "/diagnostics" in topics:
+            try:
+                diag_result = subprocess.run(
+                    ["ros2", "topic", "echo", "/diagnostics", "--once"],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
             if diag_result.returncode != 0:
                 diagnostics_output = f"/diagnostics echo failed (exit {diag_result.returncode}): {diag_result.stderr.strip() or '<no stderr>'}"
             else:
@@ -652,8 +654,14 @@ def remote_log_search(
     if host:
         quoted_path = shlex.quote(path)
         quoted_keyword = shlex.quote(keyword)
-        search_cmd = f"grep -RIn --exclude-dir=.git --max-count={max_matches} {quoted_keyword} {quoted_path} || true"
-        return remote_ssh_exec(search_cmd, host)
+        search_cmd = (
+            f"grep -RIn --exclude-dir=.git --max-count={max_matches} {quoted_keyword} {quoted_path}; "
+            "rc=$?; if [ $rc -eq 1 ]; then echo '__NO_MATCHES__'; exit 0; fi; exit $rc"
+        )
+        remote_output = remote_ssh_exec(search_cmd, host)
+        if remote_output.strip() == "__NO_MATCHES__":
+            return f"No matches for {keyword} in {path}."
+        return remote_output
 
     if not os.path.isdir(path):
         return f"Search path does not exist: {path}"
