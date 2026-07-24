@@ -904,18 +904,54 @@ def _read_latest_colcon_log(workspace_path: str, max_lines: int = 200) -> str:
 
 
 def _read_text_tail(path: str, max_lines: int) -> str:
-    if not os.path.exists(path):
+    if max_lines <= 0 or not os.path.exists(path):
         return ""
+
+    max_bytes = 64 * 1024
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            lines = handle.readlines()
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            file_size = handle.tell()
+            if file_size == 0:
+                return ""
+
+            collected = bytearray()
+            position = file_size
+            while position > 0 and len(collected) < max_bytes:
+                read_size = min(8192, position)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                if not chunk:
+                    continue
+
+                if len(collected) + len(chunk) > max_bytes:
+                    overflow = len(collected) + len(chunk) - max_bytes
+                    if overflow > 0:
+                        chunk = chunk[overflow:]
+                collected = chunk + collected
+
+                text = collected.decode("utf-8", errors="replace")
+                lines = text.splitlines(keepends=True)
+                if len(lines) > max_lines:
+                    text = "".join(lines[-max_lines:])
+                    collected = text.encode("utf-8", errors="replace")
+
+            return collected.decode("utf-8", errors="replace")
     except Exception:
         return ""
-    if max_lines <= 0:
-        return ""
-    if len(lines) <= max_lines:
-        return "".join(lines)
-    return "".join(lines[-max_lines:])
+
+
+def _process_group_running(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+    return True
 
 
 def _find_active_colcon_processes() -> list[str]:
@@ -1170,23 +1206,27 @@ def launch_script_and_capture(
     if not command.strip():
         return "No command provided."
 
-    try:
-        resolved_cwd = _resolve_workspace_path(cwd)
-    except ValueError:
-        resolved_cwd = os.path.abspath(os.path.expanduser(cwd))
-        os.makedirs(resolved_cwd, exist_ok=True)
-
-    os.makedirs(output_dir, exist_ok=True)
     process_label = label.strip() or f"script_{len(_managed_script_processes) + 1}"
-    stdout_path = os.path.join(output_dir, f"{process_label}.stdout.log")
-    stderr_path = os.path.join(output_dir, f"{process_label}.stderr.log")
-
-    if os.path.exists(stdout_path):
-        os.remove(stdout_path)
-    if os.path.exists(stderr_path):
-        os.remove(stderr_path)
+    existing_entry = _managed_script_processes.get(process_label)
+    if existing_entry and existing_entry["process"].poll() is None:
+        return f"Cannot launch '{process_label}' because a running process is already registered with that label."
 
     try:
+        try:
+            resolved_cwd = _resolve_workspace_path(cwd)
+        except ValueError:
+            resolved_cwd = os.path.abspath(os.path.expanduser(cwd))
+            os.makedirs(resolved_cwd, exist_ok=True)
+
+        os.makedirs(output_dir, exist_ok=True)
+        stdout_path = os.path.join(output_dir, f"{process_label}.stdout.log")
+        stderr_path = os.path.join(output_dir, f"{process_label}.stderr.log")
+
+        if os.path.exists(stdout_path):
+            os.remove(stdout_path)
+        if os.path.exists(stderr_path):
+            os.remove(stderr_path)
+
         if shell:
             proc = subprocess.Popen(
                 command,
@@ -1245,6 +1285,9 @@ def get_script_output(
     except (TypeError, ValueError):
         max_lines = 200
     max_lines = max(1, min(max_lines, 500))
+
+    if stream not in {"stdout", "stderr", "both"}:
+        return f"Invalid stream '{stream}'. Use 'stdout', 'stderr', or 'both'."
 
     parts = []
     proc = entry["process"]
@@ -1325,15 +1368,32 @@ def stop_managed_script_process(label: str) -> str:
     if proc.poll() is None:
         try:
             os.killpg(proc.pid, signal.SIGTERM)
-            proc.wait(5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except Exception:
-                pass
-            proc.wait()
+        except ProcessLookupError:
+            pass
         except Exception as exc:
             return f"Failed to stop process '{label}': {exc}"
+
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+        if _process_group_running(proc.pid):
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                return f"Failed to stop process '{label}': {exc}"
+
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+
+    if proc.poll() is None and _process_group_running(proc.pid):
+        return f"Process '{label}' is still running after termination attempts."
+
     del _managed_script_processes[label]
     return f"Stopped process '{label}'."
 
