@@ -931,6 +931,9 @@ def _read_text_tail(path: str, max_lines: int) -> str:
                         chunk = chunk[overflow:]
                 collected = chunk + collected
 
+                if len(collected) >= max_bytes:
+                    break
+
                 text = collected.decode("utf-8", errors="replace")
                 lines = text.splitlines(keepends=True)
                 if len(lines) > max_lines:
@@ -1206,10 +1209,21 @@ def launch_script_and_capture(
     if not command.strip():
         return "No command provided."
 
-    process_label = label.strip() or f"script_{len(_managed_script_processes) + 1}"
-    existing_entry = _managed_script_processes.get(process_label)
-    if existing_entry and existing_entry["process"].poll() is None:
-        return f"Cannot launch '{process_label}' because a running process is already registered with that label."
+    if label.strip():
+        process_label = label.strip()
+        existing_entry = _managed_script_processes.get(process_label)
+        if existing_entry and existing_entry["process"].poll() is None:
+            return f"Cannot launch '{process_label}' because a running process is already registered with that label."
+    else:
+        process_label = ""
+        counter = 1
+        while True:
+            candidate = f"script_{counter}"
+            existing_entry = _managed_script_processes.get(candidate)
+            if not existing_entry or existing_entry["process"].poll() is not None:
+                process_label = candidate
+                break
+            counter += 1
 
     try:
         try:
@@ -1365,7 +1379,7 @@ def stop_managed_script_process(label: str) -> str:
         return f"No tracked process found for label '{label}'."
 
     proc = entry["process"]
-    if proc.poll() is None:
+    if _process_group_running(proc.pid):
         try:
             os.killpg(proc.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -1391,7 +1405,7 @@ def stop_managed_script_process(label: str) -> str:
             except subprocess.TimeoutExpired:
                 pass
 
-    if proc.poll() is None and _process_group_running(proc.pid):
+    if _process_group_running(proc.pid):
         return f"Process '{label}' is still running after termination attempts."
 
     del _managed_script_processes[label]
