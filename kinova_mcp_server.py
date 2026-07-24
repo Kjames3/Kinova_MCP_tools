@@ -8,11 +8,13 @@ import re
 import shlex
 import sys
 from datetime import datetime
+from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 # Create an MCP server for Kinova Gen3
 mcp = FastMCP("Kinova MCP Tools")
 _ros2_launch_processes: dict[str, subprocess.Popen] = {}
+_managed_script_processes: dict[str, dict[str, Any]] = {}
 
 @mcp.tool()
 def get_robot_state() -> str:
@@ -579,12 +581,12 @@ def robot_health_summary() -> str:
                     text=True,
                     timeout=20,
                 )
-            if diag_result.returncode != 0:
-                diagnostics_output = f"/diagnostics echo failed (exit {diag_result.returncode}): {diag_result.stderr.strip() or '<no stderr>'}"
-            else:
-                diagnostics_output = diag_result.stdout.strip()[:2000] or "<diagnostics topic empty>"
-        except Exception as exc:
-            diagnostics_output = f"<failed to read /diagnostics: {exc}>"
+                if diag_result.returncode != 0:
+                    diagnostics_output = f"/diagnostics echo failed (exit {diag_result.returncode}): {diag_result.stderr.strip() or '<no stderr>'}"
+                else:
+                    diagnostics_output = diag_result.stdout.strip()[:2000] or "<diagnostics topic empty>"
+            except Exception as exc:
+                diagnostics_output = f"<failed to read /diagnostics: {exc}>"
 
     return (
         "ROS 2 Robot Health Summary:\n"
@@ -901,6 +903,21 @@ def _read_latest_colcon_log(workspace_path: str, max_lines: int = 200) -> str:
     )
 
 
+def _read_text_tail(path: str, max_lines: int) -> str:
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except Exception:
+        return ""
+    if max_lines <= 0:
+        return ""
+    if len(lines) <= max_lines:
+        return "".join(lines)
+    return "".join(lines[-max_lines:])
+
+
 def _find_active_colcon_processes() -> list[str]:
     try:
         result = subprocess.run(
@@ -1131,6 +1148,194 @@ def colcon_test(
         return "\n".join(output)
     except Exception as exc:
         return f"Exception while running colcon test: {exc}"
+
+@mcp.tool()
+def launch_script_and_capture(
+    command: str,
+    label: str = "",
+    cwd: str = ".",
+    output_dir: str = "/tmp/kinova_mcp_logs",
+    shell: bool = True,
+) -> str:
+    """
+    Launch a shell command and capture stdout/stderr to files for later inspection.
+
+    Arguments:
+      - command: shell command to run.
+      - label: human-readable identifier for this process.
+      - cwd: working directory for the launched command.
+      - output_dir: directory where stdout.log and stderr.log will be written.
+      - shell: whether to run the command through the shell.
+    """
+    if not command.strip():
+        return "No command provided."
+
+    try:
+        resolved_cwd = _resolve_workspace_path(cwd)
+    except ValueError:
+        resolved_cwd = os.path.abspath(os.path.expanduser(cwd))
+        os.makedirs(resolved_cwd, exist_ok=True)
+
+    os.makedirs(output_dir, exist_ok=True)
+    process_label = label.strip() or f"script_{len(_managed_script_processes) + 1}"
+    stdout_path = os.path.join(output_dir, f"{process_label}.stdout.log")
+    stderr_path = os.path.join(output_dir, f"{process_label}.stderr.log")
+
+    if os.path.exists(stdout_path):
+        os.remove(stdout_path)
+    if os.path.exists(stderr_path):
+        os.remove(stderr_path)
+
+    try:
+        if shell:
+            proc = subprocess.Popen(
+                command,
+                cwd=resolved_cwd,
+                stdout=open(stdout_path, "w"),
+                stderr=open(stderr_path, "w"),
+                start_new_session=True,
+                shell=True,
+            )
+        else:
+            proc = subprocess.Popen(
+                shlex.split(command),
+                cwd=resolved_cwd,
+                stdout=open(stdout_path, "w"),
+                stderr=open(stderr_path, "w"),
+                start_new_session=True,
+            )
+
+        _managed_script_processes[process_label] = {
+            "label": process_label,
+            "pid": proc.pid,
+            "command": command,
+            "cwd": resolved_cwd,
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+            "process": proc,
+        }
+        return (
+            f"Started process '{process_label}' with PID {proc.pid}.\n"
+            f"stdout: {stdout_path}\n"
+            f"stderr: {stderr_path}"
+        )
+    except Exception as exc:
+        return f"Failed to launch script '{process_label}': {exc}"
+
+@mcp.tool()
+def get_script_output(
+    label: str,
+    max_lines: int = 200,
+    stream: str = "both",
+) -> str:
+    """
+    Return recent stdout/stderr output from a tracked script process.
+
+    Arguments:
+      - label: the label used when launching the script.
+      - max_lines: number of lines to return from each stream.
+      - stream: 'stdout', 'stderr', or 'both'.
+    """
+    entry = _managed_script_processes.get(label)
+    if not entry:
+        return f"No tracked process found for label '{label}'."
+
+    try:
+        max_lines = int(max_lines)
+    except (TypeError, ValueError):
+        max_lines = 200
+    max_lines = max(1, min(max_lines, 500))
+
+    parts = []
+    proc = entry["process"]
+    status = "running" if proc.poll() is None else f"exited ({proc.returncode})"
+    parts.append(f"Process '{label}' status: {status}")
+
+    if stream in {"stdout", "both"}:
+        stdout_text = _read_text_tail(entry["stdout_path"], max_lines)
+        parts.append("=== stdout ===")
+        parts.append(stdout_text or "<no stdout output>")
+    if stream in {"stderr", "both"}:
+        stderr_text = _read_text_tail(entry["stderr_path"], max_lines)
+        parts.append("=== stderr ===")
+        parts.append(stderr_text or "<no stderr output>")
+    return "\n".join(parts)
+
+@mcp.tool()
+def get_script_warnings_and_errors(
+    label: str,
+    max_lines: int = 200,
+) -> str:
+    """
+    Return warning/error lines from a tracked script process.
+    """
+    entry = _managed_script_processes.get(label)
+    if not entry:
+        return f"No tracked process found for label '{label}'."
+
+    try:
+        max_lines = int(max_lines)
+    except (TypeError, ValueError):
+        max_lines = 200
+    max_lines = max(1, min(max_lines, 500))
+
+    stdout_text = _read_text_tail(entry["stdout_path"], max_lines)
+    stderr_text = _read_text_tail(entry["stderr_path"], max_lines)
+    combined = [*stdout_text.splitlines(), *stderr_text.splitlines()]
+    relevant_lines = [
+        line.strip()
+        for line in combined
+        if re.search(r"\b(warning|warn|error|exception|traceback|failed|fatal)\b", line, re.I)
+    ]
+
+    proc = entry["process"]
+    status = "running" if proc.poll() is None else f"exited ({proc.returncode})"
+    lines = [f"Process '{label}' status: {status}", "=== warning/error lines ==="]
+    if relevant_lines:
+        lines.extend(relevant_lines[-max_lines:])
+    else:
+        lines.append("<no warning/error lines found>")
+    return "\n".join(lines)
+
+@mcp.tool()
+def list_managed_script_processes() -> str:
+    """
+    List currently tracked script processes that were launched with capture enabled.
+    """
+    if not _managed_script_processes:
+        return "No tracked script processes."
+
+    lines = []
+    for label, entry in sorted(_managed_script_processes.items()):
+        proc = entry["process"]
+        status = "running" if proc.poll() is None else f"exited ({proc.returncode})"
+        lines.append(f"{label}: pid={entry['pid']}, status={status}, cmd={entry['command']}")
+    return "\n".join(lines)
+
+@mcp.tool()
+def stop_managed_script_process(label: str) -> str:
+    """
+    Stop a tracked script process.
+    """
+    entry = _managed_script_processes.get(label)
+    if not entry:
+        return f"No tracked process found for label '{label}'."
+
+    proc = entry["process"]
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                pass
+            proc.wait()
+        except Exception as exc:
+            return f"Failed to stop process '{label}': {exc}"
+    del _managed_script_processes[label]
+    return f"Stopped process '{label}'."
 
 if __name__ == "__main__":
     # Initialize and run the server using standard stdio transport for MCP
