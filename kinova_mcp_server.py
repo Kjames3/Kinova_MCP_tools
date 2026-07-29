@@ -11,12 +11,15 @@ from datetime import datetime
 from typing import Any
 from mcp.server.fastmcp import FastMCP
 
+from token_budget import token_limited
+
 # Create an MCP server for Kinova Gen3
 mcp = FastMCP("Kinova MCP Tools")
 _ros2_launch_processes: dict[str, subprocess.Popen] = {}
 _managed_script_processes: dict[str, dict[str, Any]] = {}
 
 @mcp.tool()
+@token_limited(max_tokens=1500)
 def get_robot_state() -> str:
     """
     Retrieves the current joint states of the robot using standard ROS 2 CLI.
@@ -87,6 +90,7 @@ def clear_robot_faults() -> str:
     return "[Stub] Fault clearing not implemented. Use Kortex API."
 
 @mcp.tool()
+@token_limited(max_tokens=2000)
 def remote_ssh_exec(
     command: str,
     host: str = "kinova@10.12.140.145",
@@ -117,6 +121,7 @@ def remote_ssh_exec(
         return f"SSH exception: {e}"
 
 @mcp.tool()
+@token_limited(max_tokens=3000, label="inspect_installed_packages")
 def inspect_installed_packages(
     context: str = "local",
     include_ros: bool = True,
@@ -509,6 +514,7 @@ def colcon_build_status(workspace_path: str = ".") -> str:
         return f"Error summarizing colcon build log: {exc}"
 
 @mcp.tool()
+@token_limited(max_tokens=1500)
 def fetch_ros2_nodes_and_topics() -> str:
     """
     Return active ROS 2 nodes, topics, and services.
@@ -537,6 +543,7 @@ def fetch_ros2_nodes_and_topics() -> str:
     return "\n".join(output)
 
 @mcp.tool()
+@token_limited(max_tokens=1500)
 def robot_health_summary() -> str:
     """
     Collect a summary of ROS 2 robot health and diagnostics.
@@ -638,6 +645,7 @@ def camera_snapshot(
         return f"Failed to capture camera snapshot: {exc}"
 
 @mcp.tool()
+@token_limited(max_tokens=1500, label="remote_log_search")
 def remote_log_search(
     keyword: str,
     path: str = ".",
@@ -727,6 +735,7 @@ def sync_workspace(workspace_path: str = ".", include_diff: bool = False) -> str
         return f"Workspace sync failed: {exc}"
 
 @mcp.tool()
+@token_limited(max_tokens=1000)
 def system_resource_report() -> str:
     """
     Return a brief system resource usage summary.
@@ -902,6 +911,58 @@ def _read_latest_colcon_log(workspace_path: str, max_lines: int = 200) -> str:
         f"{tail_text}"
     )
 
+def analyze_colcon_log_for_errors(log_file_path: str, max_lines: int = 100) -> str:
+    """
+    Analyze a colcon log file for errors and warnings, returning a summary.
+    """
+    if not os.path.isfile(log_file_path):
+        return f"Log file does not exist: {log_file_path}"
+
+    try:
+        tail_text, truncated = _tail_file_path(log_file_path, max_lines)
+        lines = tail_text.splitlines()
+        errors = [line for line in lines if re.search(r"\b(error|failed?)\b", line, re.I)]
+        warnings = [line for line in lines if re.search(r"\bwarning\b", line, re.I)]
+        summary = [f"Analyzing log file: {log_file_path}"]
+        if truncated:
+            summary.append(f"--- last {max_lines} lines ---")
+        summary.append(f"Errors found: {len(errors)}")
+        summary.append(f"Warnings found: {len(warnings)}")
+        if errors:
+            summary.append("Last error lines:")
+            summary.extend(errors[-10:])
+        elif warnings:
+            summary.append("Last warning lines:")
+            summary.extend(warnings[-10:])
+        else:
+            summary.append("No error or warning patterns found in the log tail.")
+        return "\n".join(summary)
+    except Exception as exc:
+        return f"Error analyzing colcon log {log_file_path}: {exc}"
+
+def analyze_csv_file_for_issues(csv_file_path: str, max_lines: int = 100) -> str:
+    """
+    Analyze a CSV file for potential issues, returning a summary.
+    """
+    if not os.path.isfile(csv_file_path):
+        return f"CSV file does not exist: {csv_file_path}"
+
+    try:
+        tail_text, truncated = _tail_file_path(csv_file_path, max_lines)
+        lines = tail_text.splitlines()
+        issues = [line for line in lines if "error" in line.lower() or "warning" in line.lower()]
+        summary = [f"Analyzing CSV file: {csv_file_path}"]
+        if truncated:
+            summary.append(f"--- last {max_lines} lines ---")
+        summary.append(f"Issues found: {len(issues)}")
+        if issues:
+            summary.append("Last issue lines:")
+            summary.extend(issues[-10:])
+        else:
+            summary.append("No error or warning patterns found in the CSV tail.")
+        return "\n".join(summary)
+    except Exception as exc:
+        return f"Error analyzing CSV file {csv_file_path}: {exc}"
 
 def _read_text_tail(path: str, max_lines: int) -> str:
     if max_lines <= 0 or not os.path.exists(path):
@@ -1012,6 +1073,7 @@ def colcon_last_build_time(workspace_path: str = ".") -> str:
     return _find_last_colcon_build_time(workspace)
 
 @mcp.tool()
+@token_limited(max_tokens=2500, label="colcon_latest_log")
 def colcon_latest_log(workspace_path: str = ".", max_lines: int = 200) -> str:
     """
     Return the latest colcon log file contents from the workspace.
@@ -1277,6 +1339,7 @@ def launch_script_and_capture(
         return f"Failed to launch script '{process_label}': {exc}"
 
 @mcp.tool()
+@token_limited(max_tokens=2500, label="get_script_output")
 def get_script_output(
     label: str,
     max_lines: int = 200,

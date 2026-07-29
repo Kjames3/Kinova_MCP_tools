@@ -53,36 +53,58 @@ def clip_output(
     (default -- most recent/relevant for logs) or the head.
 
     Returns the original text unchanged if it's already within budget.
+    Token enforcement is best-effort when tiktoken is unavailable and the
+    fallback heuristic is used.
     """
     if not text:
         return text
+
+    if keep not in {"head", "tail"}:
+        raise ValueError("keep must be either 'head' or 'tail'")
 
     total = count_tokens(text)
     if total <= max_tokens:
         return text
 
-    # Binary-search-free approximate clip: estimate a char cutoff from the
-    # ratio of tokens we need to drop, then nudge if we overshot.
-    ratio = max_tokens / total
-    cutoff = max(1, int(len(text) * ratio))
-
     if keep == "head":
-        clipped = text[:cutoff]
-        # Trim to a clean line boundary so we don't cut mid-line.
-        clipped = clipped.rsplit("\n", 1)[0] if "\n" in clipped else clipped
         notice = (
             f"\n\n[...clipped: showing first ~{max_tokens} of ~{total} "
             f"estimated tokens from {label}...]"
         )
-        return clipped + notice
     else:
-        clipped = text[-cutoff:]
-        clipped = clipped.split("\n", 1)[-1] if "\n" in clipped else clipped
         notice = (
             f"[...clipped: showing last ~{max_tokens} of ~{total} "
             f"estimated tokens from {label}...]\n\n"
         )
-        return notice + clipped
+
+    notice_tokens = count_tokens(notice)
+    if notice_tokens >= max_tokens:
+        return notice
+
+    budget = max_tokens - notice_tokens
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return notice
+
+    candidate = ""
+    if keep == "head":
+        for line in lines:
+            next_candidate = candidate + line
+            rendered = next_candidate + notice
+            if count_tokens(rendered) <= max_tokens:
+                candidate = next_candidate
+            else:
+                break
+        return candidate + notice
+    else:
+        for line in reversed(lines):
+            next_candidate = line + candidate
+            rendered = notice + next_candidate
+            if count_tokens(rendered) <= max_tokens:
+                candidate = next_candidate
+            else:
+                break
+        return notice + candidate
 
 
 def token_limited(max_tokens: int = 2000, label: str | None = None, keep: str = "tail"):
