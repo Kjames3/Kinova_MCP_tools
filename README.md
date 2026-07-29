@@ -62,6 +62,14 @@ Example configuration:
 
 These tools work through Claude as long as the MCP server is reachable and the configured process has access to the workspace and `colcon` binary.
 
+## Recent reliability updates
+
+The MCP server and token-budget helper include a few small safety improvements:
+
+- Log tailing in `kinova_mcp_server.py` now clamps oversized `max_lines` requests to an effective upper bound and limits how much data is read from very large files, preventing unbounded memory use from huge files or extremely long lines.
+- The same log-tail paths now report the effective clamped line limit in their status messages instead of the original oversized request.
+- `token_budget.py` now validates the `keep` argument so only `"head"` and `"tail"` are accepted, and its clipping logic preserves whole-line candidates while keeping the notice and content within the requested token budget whenever possible.
+
 ## Available Tools (Current Stubs)
 
 The `kinova_mcp_server.py` provides the following tools. You will need to fill in the actual `subprocess` or `rclpy` logic for some of them.

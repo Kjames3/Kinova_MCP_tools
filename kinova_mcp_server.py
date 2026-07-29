@@ -826,11 +826,15 @@ def _find_colcon_log_file(workspace_path: str) -> str | None:
     return max(candidates, key=os.path.getmtime)
 
 
+def _normalize_tail_line_limit(max_lines: int) -> int:
+    return max(1, min(int(max_lines), 1000))
+
+
 def _tail_file_path(file_path: str, max_lines: int) -> tuple[str, bool]:
     if max_lines <= 0:
         return "", False
 
-    max_lines = max(1, min(int(max_lines), 1000))
+    max_lines = _normalize_tail_line_limit(max_lines)
     max_bytes = 64 * 1024
     block_size = 8192
     with open(file_path, "rb") as f:
@@ -899,15 +903,16 @@ def _read_latest_colcon_log(workspace_path: str, max_lines: int = 200) -> str:
             f"--- no log lines requested (max_lines={max_lines}) ---"
         )
 
+    effective_max_lines = _normalize_tail_line_limit(max_lines)
     try:
-        tail_text, truncated = _tail_file_path(log_file, max_lines)
+        tail_text, truncated = _tail_file_path(log_file, effective_max_lines)
     except Exception as exc:
         return f"Error reading latest colcon log {log_file}: {exc}"
 
     if truncated:
         return (
             f"Latest log file: {os.path.relpath(log_file, workspace_path)}\n"
-            f"--- last {max_lines} lines ---\n"
+            f"--- last {effective_max_lines} lines ---\n"
             f"{tail_text}"
         )
 
@@ -924,14 +929,15 @@ def analyze_colcon_log_for_errors(log_file_path: str, max_lines: int = 100) -> s
     if not os.path.isfile(log_file_path):
         return f"Log file does not exist: {log_file_path}"
 
+    effective_max_lines = _normalize_tail_line_limit(max_lines)
     try:
-        tail_text, truncated = _tail_file_path(log_file_path, max_lines)
+        tail_text, truncated = _tail_file_path(log_file_path, effective_max_lines)
         lines = tail_text.splitlines()
         errors = [line for line in lines if re.search(r"\b(error|failed?)\b", line, re.I)]
         warnings = [line for line in lines if re.search(r"\bwarning\b", line, re.I)]
         summary = [f"Analyzing log file: {log_file_path}"]
         if truncated:
-            summary.append(f"--- last {max_lines} lines ---")
+            summary.append(f"--- last {effective_max_lines} lines ---")
         summary.append(f"Errors found: {len(errors)}")
         summary.append(f"Warnings found: {len(warnings)}")
         if errors:
@@ -953,13 +959,14 @@ def analyze_csv_file_for_issues(csv_file_path: str, max_lines: int = 100) -> str
     if not os.path.isfile(csv_file_path):
         return f"CSV file does not exist: {csv_file_path}"
 
+    effective_max_lines = _normalize_tail_line_limit(max_lines)
     try:
-        tail_text, truncated = _tail_file_path(csv_file_path, max_lines)
+        tail_text, truncated = _tail_file_path(csv_file_path, effective_max_lines)
         lines = tail_text.splitlines()
         issues = [line for line in lines if "error" in line.lower() or "warning" in line.lower()]
         summary = [f"Analyzing CSV file: {csv_file_path}"]
         if truncated:
-            summary.append(f"--- last {max_lines} lines ---")
+            summary.append(f"--- last {effective_max_lines} lines ---")
         summary.append(f"Issues found: {len(issues)}")
         if issues:
             summary.append("Last issue lines:")
