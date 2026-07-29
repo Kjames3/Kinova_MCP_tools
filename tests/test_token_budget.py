@@ -1,6 +1,6 @@
 import unittest
 
-from token_budget import clip_output
+from token_budget import clip_output, count_tokens
 
 
 class ClipOutputTests(unittest.TestCase):
@@ -11,6 +11,7 @@ class ClipOutputTests(unittest.TestCase):
     def test_head_clipping_prefers_notice_over_mid_line_fragment(self) -> None:
         result = clip_output("abcdefghijklmnopqrstuvwxyz", max_tokens=4, label="demo", keep="head")
         self.assertTrue(result.startswith("\n\n[..."))
+        self.assertLessEqual(count_tokens(result), 4)
 
 
 if __name__ == "__main__":

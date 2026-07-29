@@ -56,11 +56,11 @@ def clip_output(
     Token enforcement is best-effort when tiktoken is unavailable and the
     fallback heuristic is used.
     """
-    if not text:
-        return text
-
     if keep not in {"head", "tail"}:
         raise ValueError("keep must be either 'head' or 'tail'")
+
+    if not text:
+        return text
 
     total = count_tokens(text)
     if total <= max_tokens:
@@ -78,10 +78,18 @@ def clip_output(
         )
 
     notice_tokens = count_tokens(notice)
-    if notice_tokens >= max_tokens:
+    if notice_tokens == max_tokens:
         return notice
+    if notice_tokens > max_tokens:
+        truncated_notice = ""
+        for char in notice:
+            candidate = truncated_notice + char
+            if count_tokens(candidate) <= max_tokens:
+                truncated_notice = candidate
+            else:
+                break
+        return truncated_notice
 
-    budget = max_tokens - notice_tokens
     lines = text.splitlines(keepends=True)
     if not lines:
         return notice

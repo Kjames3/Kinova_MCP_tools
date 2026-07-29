@@ -830,6 +830,8 @@ def _tail_file_path(file_path: str, max_lines: int) -> tuple[str, bool]:
     if max_lines <= 0:
         return "", False
 
+    max_lines = max(1, min(int(max_lines), 1000))
+    max_bytes = 64 * 1024
     block_size = 8192
     with open(file_path, "rb") as f:
         f.seek(0, os.SEEK_END)
@@ -839,18 +841,22 @@ def _tail_file_path(file_path: str, max_lines: int) -> tuple[str, bool]:
 
         data = bytearray()
         lines_found = 0
+        bytes_limited = False
         pos = file_size
-        while pos > 0 and lines_found <= max_lines:
+        while pos > 0 and lines_found <= max_lines and not bytes_limited:
             read_size = min(block_size, pos)
             pos -= read_size
             f.seek(pos)
             chunk = f.read(read_size)
             data[:0] = chunk
+            if len(data) > max_bytes:
+                del data[:-max_bytes]
+                bytes_limited = True
             lines_found += chunk.count(b"\n")
 
     text = data.decode("utf-8", errors="replace")
     lines = text.splitlines(keepends=True)
-    if len(lines) <= max_lines:
+    if len(lines) <= max_lines and not bytes_limited:
         return text, False
     return "".join(lines[-max_lines:]), True
 
